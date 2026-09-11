@@ -4,6 +4,7 @@
 #include <RTClib.h>
 #include <SparkFun_CY8CMBR3.h>
 #include <Adafruit_SHT31.h>
+#include <esp_sleep.h>
 
 // ==================================================
 // I2C設定
@@ -32,11 +33,15 @@ constexpr uint32_t SD_FREQUENCY = 400000;
 // 測定設定
 // ==================================================
 
-// 動作確認用：2秒間隔
-constexpr unsigned long MEASUREMENT_INTERVAL_MS = 2000;
+// deep sleep時間：1分
+constexpr uint64_t SLEEP_INTERVAL_US = 60ULL * 1000000ULL;
 
-// 今回はRTCの日時を設定するためtrue
-// 成功後はfalseに戻して再度書き込む
+// シリアルモニター確認用の待機時間
+constexpr unsigned long SERIAL_STARTUP_DELAY_MS = 10000;
+constexpr unsigned long BEFORE_SLEEP_DELAY_MS = 5000;
+
+// trueにすると起動ごとにRTCをコンパイル時刻へ設定する
+// 通常はfalse。RTC未設定時は自動で一度だけ設定する。
 constexpr bool SET_RTC_FROM_COMPILE_TIME = false;
 
 const char *CSV_FILE = "/soil8_log.csv";
@@ -55,8 +60,6 @@ const int SENSOR_DEPTH_CM[SENSOR_COUNT] = {
 SfeCY8CMBR3ArdI2C moistureSensors[SENSOR_COUNT];
 Adafruit_SHT31 sht31Sensors[SENSOR_COUNT];
 RTC_PCF8523 rtc;
-
-unsigned long previousMeasurementTime = 0;
 
 // ==================================================
 // PCA9546チャンネル選択
@@ -446,7 +449,7 @@ void takeMeasurement()
 void setup()
 {
   Serial.begin(115200);
-  delay(1500);
+  delay(SERIAL_STARTUP_DELAY_MS);
 
   Serial.println();
   Serial.println(
@@ -493,21 +496,26 @@ void setup()
 
   Serial.println("PCF8523 detected.");
 
-  if (SET_RTC_FROM_COMPILE_TIME)
+  bool rtcTimeInvalid = !rtc.initialized() || rtc.lostPower();
+
+  if (SET_RTC_FROM_COMPILE_TIME || rtcTimeInvalid)
   {
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
     rtc.start();
 
-    Serial.println(
-      "RTC was set from the computer compile time."
-    );
-  }
-  else if (!rtc.initialized() || rtc.lostPower())
-  {
-    stopProgram(
-      "RTC time is invalid. "
-      "Set SET_RTC_FROM_COMPILE_TIME to true once."
-    );
+    if (rtcTimeInvalid)
+    {
+      Serial.println(
+        "RTC time was invalid. "
+        "RTC was set from the computer compile time."
+      );
+    }
+    else
+    {
+      Serial.println(
+        "RTC was set from the computer compile time."
+      );
+    }
   }
 
   Serial.println("PCF8523 initialization OK.");
@@ -528,7 +536,13 @@ void setup()
   // 起動直後に1回測定
   takeMeasurement();
 
-  previousMeasurementTime = millis();
+  Serial.println();
+  Serial.println("Going to deep sleep for 60 seconds.");
+  Serial.flush();
+  delay(BEFORE_SLEEP_DELAY_MS);
+
+  esp_sleep_enable_timer_wakeup(SLEEP_INTERVAL_US);
+  esp_deep_sleep_start();
 }
 
 // ==================================================
@@ -537,15 +551,4 @@ void setup()
 
 void loop()
 {
-  unsigned long currentTime = millis();
-
-  if (
-    currentTime - previousMeasurementTime
-    >= MEASUREMENT_INTERVAL_MS
-  )
-  {
-    previousMeasurementTime = currentTime;
-
-    takeMeasurement();
-  }
 }
