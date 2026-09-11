@@ -33,8 +33,8 @@ constexpr uint32_t SD_FREQUENCY = 400000;
 // 測定設定
 // ==================================================
 
-// deep sleep時間：1分
-constexpr uint64_t SLEEP_INTERVAL_US = 60ULL * 1000000ULL;
+// deep sleep時間：10分
+constexpr uint64_t SLEEP_INTERVAL_US = 10ULL * 60ULL * 1000000ULL;
 
 // シリアルモニター確認用の待機時間
 constexpr unsigned long SERIAL_STARTUP_DELAY_MS = 10000;
@@ -60,6 +60,8 @@ const int SENSOR_DEPTH_CM[SENSOR_COUNT] = {
 SfeCY8CMBR3ArdI2C moistureSensors[SENSOR_COUNT];
 Adafruit_SHT31 sht31Sensors[SENSOR_COUNT];
 RTC_PCF8523 rtc;
+
+bool sdCardAvailable = false;
 
 // ==================================================
 // PCA9546チャンネル選択
@@ -194,19 +196,20 @@ bool initializeSDCard()
 // CSVファイル作成
 // ==================================================
 
-void createCSVFile()
+bool createCSVFile()
 {
   if (SD.exists(CSV_FILE))
   {
     Serial.println("soil8_log.csv already exists.");
-    return;
+    return true;
   }
 
   File file = SD.open(CSV_FILE, FILE_WRITE);
 
   if (!file)
   {
-    stopProgram("Failed to create soil8_log.csv.");
+    Serial.println("Failed to create soil8_log.csv.");
+    return false;
   }
 
   file.println(
@@ -221,6 +224,8 @@ void createCSVFile()
   file.close();
 
   Serial.println("Created soil8_log.csv.");
+
+  return true;
 }
 
 // ==================================================
@@ -424,7 +429,11 @@ void takeMeasurement()
   Serial.print("Status: ");
   Serial.println(status);
 
-  if (
+  if (!sdCardAvailable)
+  {
+    Serial.println("SD card is not available. Measurement was not saved.");
+  }
+  else if (
     saveMeasurement(
       timestamp,
       capacitance,
@@ -521,14 +530,24 @@ void setup()
   Serial.println("PCF8523 initialization OK.");
 
   // microSD
-  if (!initializeSDCard())
+  sdCardAvailable = initializeSDCard();
+
+  if (sdCardAvailable)
   {
-    stopProgram(
-      "SD initialization failed after 5 attempts."
+    sdCardAvailable = createCSVFile();
+  }
+  else
+  {
+    Serial.println(
+      "SD initialization failed after 5 attempts. "
+      "Measurement will continue without saving."
     );
   }
 
-  createCSVFile();
+  if (!sdCardAvailable)
+  {
+    Serial.println("SD logging is disabled for this wake cycle.");
+  }
 
   Serial.println();
   Serial.println("All devices initialized successfully.");
@@ -537,7 +556,7 @@ void setup()
   takeMeasurement();
 
   Serial.println();
-  Serial.println("Going to deep sleep for 60 seconds.");
+  Serial.println("Going to deep sleep for 10 minutes.");
   Serial.flush();
   delay(BEFORE_SLEEP_DELAY_MS);
 
