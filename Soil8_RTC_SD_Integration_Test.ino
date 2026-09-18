@@ -45,6 +45,7 @@ constexpr unsigned long BEFORE_SLEEP_DELAY_MS = 5000;
 constexpr bool SET_RTC_FROM_COMPILE_TIME = false;
 
 const char *CSV_FILE = "/soil8_log.csv";
+const char *EVENT_FILE = "/soil8_events.csv";
 
 const int SENSOR_DEPTH_CM[SENSOR_COUNT] = {
   10,
@@ -62,6 +63,11 @@ Adafruit_SHT31 sht31Sensors[SENSOR_COUNT];
 RTC_PCF8523 rtc;
 
 bool sdCardAvailable = false;
+bool eventLogAvailable = false;
+bool pcaAvailable = false;
+bool rtcAvailable = false;
+bool moistureSensorAvailable[SENSOR_COUNT] = { false };
+bool sht31SensorAvailable[SENSOR_COUNT] = { false };
 
 // ==================================================
 // PCA9546チャンネル選択
@@ -81,26 +87,94 @@ bool selectPCAChannel(uint8_t channel)
 }
 
 // ==================================================
-// エラー時に停止
+// タイムスタンプ作成
 // ==================================================
 
-void stopProgram(const char *message)
+void formatTimestamp(char *timestamp, size_t timestampSize)
 {
-  Serial.println();
-  Serial.println(message);
-  Serial.println("Program halted.");
-
-  while (true)
+  if (!rtcAvailable)
   {
-    delay(1000);
+    snprintf(
+      timestamp,
+      timestampSize,
+      "NO_RTC_%lu",
+      millis() / 1000UL
+    );
+
+    return;
   }
+
+  DateTime now = rtc.now();
+
+  snprintf(
+    timestamp,
+    timestampSize,
+    "%04d-%02d-%02d %02d:%02d:%02d",
+    now.year(),
+    now.month(),
+    now.day(),
+    now.hour(),
+    now.minute(),
+    now.second()
+  );
+}
+
+// ==================================================
+// イベントログ保存
+// ==================================================
+
+void logEvent(
+  const char *event,
+  const char *component,
+  int channel,
+  const char *message)
+{
+  char timestamp[24];
+  formatTimestamp(timestamp, sizeof(timestamp));
+
+  Serial.print("[EVENT] ");
+  Serial.print(timestamp);
+  Serial.print(" ");
+  Serial.print(event);
+  Serial.print(" ");
+  Serial.print(component);
+  Serial.print(" ch=");
+  Serial.print(channel);
+  Serial.print(" ");
+  Serial.println(message);
+
+  if (!eventLogAvailable)
+  {
+    return;
+  }
+
+  File file = SD.open(EVENT_FILE, FILE_APPEND);
+
+  if (!file)
+  {
+    Serial.println("Failed to open soil8_events.csv.");
+    eventLogAvailable = false;
+    return;
+  }
+
+  file.print(timestamp);
+  file.print(",");
+  file.print(event);
+  file.print(",");
+  file.print(component);
+  file.print(",");
+  file.print(channel);
+  file.print(",");
+  file.println(message);
+
+  file.close();
 }
 
 // ==================================================
 // 各チャンネルのセンサー初期化
 // ==================================================
 
-bool initializeChannel(uint8_t channel)
+void initializeChannel(uint8_t channel)
 {
   Serial.println();
   Serial.print("Initializing Channel ");
@@ -113,52 +187,90 @@ bool initializeChannel(uint8_t channel)
   if (!selectPCAChannel(channel))
   {
     Serial.println("Channel selection failed.");
-    return false;
+    logEvent(
+      "INIT_ERROR",
+      "PCA9546",
+      channel,
+      "Channel selection failed for SEN-30480"
+    );
   }
-
-  delay(100);
-
-  if (!moistureSensors[channel].begin())
+  else
   {
-    Serial.println("SEN-30480 connection failed.");
-    return false;
+    delay(100);
+
+    if (!moistureSensors[channel].begin())
+    {
+      Serial.println("SEN-30480 connection failed.");
+      logEvent(
+        "INIT_ERROR",
+        "SEN-30480",
+        channel,
+        "SEN-30480 connection failed"
+      );
+    }
+    else if (!selectPCAChannel(channel))
+    {
+      Serial.println("Channel reselection failed.");
+      logEvent(
+        "INIT_ERROR",
+        "PCA9546",
+        channel,
+        "Channel reselection failed for SEN-30480"
+      );
+    }
+    else
+    {
+      delay(50);
+
+      if (!moistureSensors[channel].defaultMoistureSensorInit())
+      {
+        Serial.println("SEN-30480 initialization failed.");
+        logEvent(
+          "INIT_ERROR",
+          "SEN-30480",
+          channel,
+          "SEN-30480 initialization failed"
+        );
+      }
+      else
+      {
+        moistureSensorAvailable[channel] = true;
+        Serial.println("SEN-30480 initialization OK.");
+      }
+    }
   }
-
-  // begin()後にチャンネルを選び直す
-  if (!selectPCAChannel(channel))
-  {
-    Serial.println("Channel reselection failed.");
-    return false;
-  }
-
-  delay(50);
-
-  if (!moistureSensors[channel].defaultMoistureSensorInit())
-  {
-    Serial.println("SEN-30480 initialization failed.");
-    return false;
-  }
-
-  Serial.println("SEN-30480 initialization OK.");
 
   // FS304-SHT31
   if (!selectPCAChannel(channel))
   {
     Serial.println("Channel selection failed.");
-    return false;
+    logEvent(
+      "INIT_ERROR",
+      "PCA9546",
+      channel,
+      "Channel selection failed for FS304-SHT31"
+    );
   }
-
-  delay(100);
-
-  if (!sht31Sensors[channel].begin(SHT31_ADDRESS))
+  else
   {
-    Serial.println("FS304-SHT31 initialization failed.");
-    return false;
+    delay(100);
+
+    if (!sht31Sensors[channel].begin(SHT31_ADDRESS))
+    {
+      Serial.println("FS304-SHT31 initialization failed.");
+      logEvent(
+        "INIT_ERROR",
+        "FS304-SHT31",
+        channel,
+        "FS304-SHT31 initialization failed"
+      );
+    }
+    else
+    {
+      sht31SensorAvailable[channel] = true;
+      Serial.println("FS304-SHT31 initialization OK.");
+    }
   }
-
-  Serial.println("FS304-SHT31 initialization OK.");
-
-  return true;
 }
 
 // ==================================================
@@ -224,6 +336,33 @@ bool createCSVFile()
   file.close();
 
   Serial.println("Created soil8_log.csv.");
+
+  return true;
+}
+
+bool createEventLogFile()
+{
+  if (SD.exists(EVENT_FILE))
+  {
+    Serial.println("soil8_events.csv already exists.");
+    return true;
+  }
+
+  File file = SD.open(EVENT_FILE, FILE_WRITE);
+
+  if (!file)
+  {
+    Serial.println("Failed to create soil8_events.csv.");
+    return false;
+  }
+
+  file.println(
+    "timestamp_jst,event,component,channel,message"
+  );
+
+  file.close();
+
+  Serial.println("Created soil8_events.csv.");
 
   return true;
 }
@@ -301,21 +440,8 @@ bool saveMeasurement(
 
 void takeMeasurement()
 {
-  DateTime now = rtc.now();
-
   char timestamp[24];
-
-  snprintf(
-    timestamp,
-    sizeof(timestamp),
-    "%04d-%02d-%02d %02d:%02d:%02d",
-    now.year(),
-    now.month(),
-    now.day(),
-    now.hour(),
-    now.minute(),
-    now.second()
-  );
+  formatTimestamp(timestamp, sizeof(timestamp));
 
   uint8_t capacitance[SENSOR_COUNT];
   float humidity[SENSOR_COUNT];
@@ -327,45 +453,85 @@ void takeMeasurement()
        channel < SENSOR_COUNT;
        channel++)
   {
-    // SEN-30480
-    if (!selectPCAChannel(channel))
+    capacitance[channel] = 0;
+    humidity[channel] = NAN;
+    temperature[channel] = NAN;
+
+    if (!pcaAvailable)
     {
-      capacitance[channel] = 0;
-      humidity[channel] = NAN;
-      temperature[channel] = NAN;
       allSensorsOK = false;
       continue;
     }
 
-    delay(20);
+    // SEN-30480
+    if (!moistureSensorAvailable[channel])
+    {
+      allSensorsOK = false;
+    }
+    else if (!selectPCAChannel(channel))
+    {
+      allSensorsOK = false;
+      logEvent(
+        "READ_ERROR",
+        "PCA9546",
+        channel,
+        "Channel selection failed for SEN-30480 read"
+      );
+    }
+    else
+    {
+      delay(20);
 
-    capacitance[channel] =
-      moistureSensors[channel].readCapacitancePF();
+      capacitance[channel] =
+        moistureSensors[channel].readCapacitancePF();
+
+      if (capacitance[channel] == 0)
+      {
+        allSensorsOK = false;
+        logEvent(
+          "READ_ERROR",
+          "SEN-30480",
+          channel,
+          "SEN-30480 capacitance read failed"
+        );
+      }
+    }
 
     // FS304-SHT31
-    if (!selectPCAChannel(channel))
+    if (!sht31SensorAvailable[channel])
     {
-      humidity[channel] = NAN;
-      temperature[channel] = NAN;
       allSensorsOK = false;
-      continue;
     }
-
-    delay(20);
-
-    humidity[channel] =
-      sht31Sensors[channel].readHumidity();
-
-    temperature[channel] =
-      sht31Sensors[channel].readTemperature();
-
-    if (
-      capacitance[channel] == 0 ||
-      isnan(humidity[channel]) ||
-      isnan(temperature[channel])
-    )
+    else if (!selectPCAChannel(channel))
     {
       allSensorsOK = false;
+      logEvent(
+        "READ_ERROR",
+        "PCA9546",
+        channel,
+        "Channel selection failed for FS304-SHT31 read"
+      );
+    }
+    else
+    {
+      delay(20);
+
+      humidity[channel] =
+        sht31Sensors[channel].readHumidity();
+
+      temperature[channel] =
+        sht31Sensors[channel].readTemperature();
+
+      if (isnan(humidity[channel]) || isnan(temperature[channel]))
+      {
+        allSensorsOK = false;
+        logEvent(
+          "READ_ERROR",
+          "FS304-SHT31",
+          channel,
+          "FS304-SHT31 humidity or temperature read failed"
+        );
+      }
     }
   }
 
@@ -432,6 +598,12 @@ void takeMeasurement()
   if (!sdCardAvailable)
   {
     Serial.println("SD card is not available. Measurement was not saved.");
+    logEvent(
+      "SD_ERROR",
+      "SD",
+      -1,
+      "Measurement was not saved because SD card is not available"
+    );
   }
   else if (
     saveMeasurement(
@@ -448,6 +620,12 @@ void takeMeasurement()
   else
   {
     Serial.println("SD write failed.");
+    logEvent(
+      "SD_ERROR",
+      "SD",
+      -1,
+      "SD write failed for soil8_log.csv"
+    );
   }
 }
 
@@ -470,87 +648,152 @@ void setup()
   Wire.begin(SDA_PIN, SCL_PIN);
   Wire.setClock(100000);
 
-  // PCA9546確認
-  Wire.beginTransmission(PCA9546_ADDRESS);
-
-  if (Wire.endTransmission() != 0)
-  {
-    stopProgram("PCA9546 was not detected at 0x70.");
-  }
-
-  Serial.println("PCA9546 detected.");
-
-  // 4チャンネルを初期化
-  for (uint8_t channel = 0;
-       channel < SENSOR_COUNT;
-       channel++)
-  {
-    if (!initializeChannel(channel))
-    {
-      Serial.print("Failed Channel: ");
-      Serial.println(channel);
-
-      stopProgram("Sensor initialization failed.");
-    }
-  }
-
-  Serial.println();
-  Serial.println("All eight sensor functions initialized.");
-
   // PCF8523
-  if (!rtc.begin())
+  rtcAvailable = rtc.begin();
+  bool rtcTimeInvalid = false;
+
+  if (rtcAvailable)
   {
-    stopProgram("PCF8523 was not detected.");
+    Serial.println("PCF8523 detected.");
+
+    rtcTimeInvalid = !rtc.initialized() || rtc.lostPower();
+
+    if (SET_RTC_FROM_COMPILE_TIME || rtcTimeInvalid)
+    {
+      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+      rtc.start();
+
+      if (rtcTimeInvalid)
+      {
+        Serial.println(
+          "RTC time was invalid. "
+          "RTC was set from the computer compile time."
+        );
+      }
+      else
+      {
+        Serial.println(
+          "RTC was set from the computer compile time."
+        );
+      }
+    }
+
+    Serial.println("PCF8523 initialization OK.");
   }
-
-  Serial.println("PCF8523 detected.");
-
-  bool rtcTimeInvalid = !rtc.initialized() || rtc.lostPower();
-
-  if (SET_RTC_FROM_COMPILE_TIME || rtcTimeInvalid)
+  else
   {
-    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-    rtc.start();
-
-    if (rtcTimeInvalid)
-    {
-      Serial.println(
-        "RTC time was invalid. "
-        "RTC was set from the computer compile time."
-      );
-    }
-    else
-    {
-      Serial.println(
-        "RTC was set from the computer compile time."
-      );
-    }
+    Serial.println("PCF8523 was not detected.");
   }
-
-  Serial.println("PCF8523 initialization OK.");
 
   // microSD
   sdCardAvailable = initializeSDCard();
 
   if (sdCardAvailable)
   {
-    sdCardAvailable = createCSVFile();
+    bool measurementLogAvailable = createCSVFile();
+    eventLogAvailable = createEventLogFile();
+
+    if (!measurementLogAvailable)
+    {
+      sdCardAvailable = false;
+      logEvent(
+        "SD_ERROR",
+        "SD",
+        -1,
+        "Failed to create soil8_log.csv"
+      );
+    }
+
+    if (!eventLogAvailable)
+    {
+      logEvent(
+        "SD_ERROR",
+        "SD",
+        -1,
+        "Failed to create soil8_events.csv"
+      );
+
+      Serial.println(
+        "Event logging to SD is disabled for this wake cycle."
+      );
+    }
   }
   else
   {
+    logEvent(
+      "SD_ERROR",
+      "SD",
+      -1,
+      "SD initialization failed after 5 attempts"
+    );
+
     Serial.println(
-      "SD initialization failed after 5 attempts. "
       "Measurement will continue without saving."
     );
   }
 
   if (!sdCardAvailable)
   {
-    Serial.println("SD logging is disabled for this wake cycle.");
+    Serial.println("SD measurement logging is disabled for this wake cycle.");
+  }
+
+  if (!rtcAvailable)
+  {
+    logEvent(
+      "INIT_ERROR",
+      "PCF8523",
+      -1,
+      "PCF8523 was not detected"
+    );
+  }
+  else if (rtcTimeInvalid)
+  {
+    logEvent(
+      "RTC_SET",
+      "PCF8523",
+      -1,
+      "RTC time was invalid and set from compile time"
+    );
+  }
+  else if (SET_RTC_FROM_COMPILE_TIME)
+  {
+    logEvent(
+      "RTC_SET",
+      "PCF8523",
+      -1,
+      "RTC was set from compile time by configuration"
+    );
+  }
+
+  // PCA9546確認
+  Wire.beginTransmission(PCA9546_ADDRESS);
+  pcaAvailable = Wire.endTransmission() == 0;
+
+  if (pcaAvailable)
+  {
+    Serial.println("PCA9546 detected.");
+
+    // 4チャンネルを初期化
+    for (uint8_t channel = 0;
+         channel < SENSOR_COUNT;
+         channel++)
+    {
+      initializeChannel(channel);
+    }
+  }
+  else
+  {
+    Serial.println("PCA9546 was not detected at 0x70.");
+    logEvent(
+      "INIT_ERROR",
+      "PCA9546",
+      -1,
+      "PCA9546 was not detected at 0x70"
+    );
   }
 
   Serial.println();
-  Serial.println("All devices initialized successfully.");
+  Serial.println("Device initialization completed.");
 
   // 起動直後に1回測定
   takeMeasurement();
